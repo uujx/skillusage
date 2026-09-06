@@ -1,0 +1,48 @@
+{
+  "name": "@uujx/skillusage",
+  "version": "0.1.0",
+  "description": "See which Codex skills you use most, with local reports by date and project.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/uujx/skillusage.git"
+  },
+  "homepage": "https://github.com/uujx/skillusage#readme",
+  "bugs": {
+    "url": "https://github.com/uujx/skillusage/issues"
+  },
+  "keywords": ["codex", "skills", "cli", "analytics", "local-first"],
+  "type": "module",
+  "bin": {
+    "skillusage": "./dist/cli/main.js"
+  },
+  "files": [
+    "dist",
+    "assets/terminal-preview.txt",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepack": "npm run build",
+    "build": "tsc -p tsconfig.json && node scripts/mark-bin.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "tsx --test test/**/*.test.ts && npm run test:dist",
+    "test:dist": "npm run build --silent && node --test test-dist/codex/*.test.mjs",
+    "test:watch": "tsx --test --watch test/**/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "eslint": "^9.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.0.0"
+  }
+}

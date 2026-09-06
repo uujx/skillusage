@@ -1,0 +1,28 @@
+.agents/
+docs/
+openspec/
+.private/
+node_modules/
+dist/
+npm-debug.log*
+*.tgz
+
+# Local Python cache
+__pycache__/
+*.py[cod]
+
+# Test and tool cache
+.pytest_cache/
+coverage/
+.nyc_output/
+.eslintcache
+*.tsbuildinfo
+
+# Local environment and OS files
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Local agent runtime state
+.superpowers/
