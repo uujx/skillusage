@@ -123,7 +123,7 @@ export function classifyReadCommand(command: string): ReadCommandClassification 
       unknownRelevant ||= relevant;
       continue;
     }
-    const readPaths = files.filter((path) => path.endsWith("/SKILL.md") || path === "SKILL.md");
+    const readPaths = files.filter((path) => /[/\\]SKILL\.md$/.test(path) || path === "SKILL.md");
     paths.push(...readPaths);
     const successProven =
       !segments.slice(0, index).some((item) => item.before === "||") &&

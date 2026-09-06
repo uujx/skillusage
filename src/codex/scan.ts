@@ -178,8 +178,8 @@ function sessionSkillEntries(value: unknown): Array<{ name: string; path: string
     }
     if (!text.includes("SKILL.md")) continue;
     const parsed: Array<{ name: string; path: string }> = [];
-    for (const match of text.matchAll(/<name>\s*([^<\r\n]+)\s*<\/name>[\s\S]{0,2000}?<path>\s*([^<\r\n]+\/SKILL\.md)\s*<\/path>/g)) parsed.push({ name: match[1]!.trim(), path: match[2]!.trim() });
-    for (const match of text.matchAll(/(?:^|\n)\s*-\s*([^\n(]{1,100}).*?\(file:\s*([^\s)]+\/SKILL\.md)\)/g)) parsed.push({ name: match[1]!.trim(), path: match[2]!.trim() });
+    for (const match of text.matchAll(/<name>\s*([^<\r\n]+)\s*<\/name>[\s\S]{0,2000}?<path>\s*([^<\r\n]+[/\\]SKILL\.md)\s*<\/path>/g)) parsed.push({ name: match[1]!.trim(), path: match[2]!.trim() });
+    for (const match of text.matchAll(/(?:^|\n)\s*-\s*([^\n(]{1,100}).*?\(file:\s*([^\s)]+[/\\]SKILL\.md)\)/g)) parsed.push({ name: match[1]!.trim(), path: match[2]!.trim() });
     sessionSkillCache.set(text, parsed);
     entries.push(...parsed);
   }

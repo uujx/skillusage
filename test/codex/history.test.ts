@@ -3,6 +3,18 @@ import test from "node:test";
 
 import { classifyReadCommand, skillId } from "../../src/codex/history.js";
 
+test("recognizes Windows entry paths without counting mentions or other files", () => {
+  const path = String.raw`C:\Users\runner\skills\demo\SKILL.md`;
+  assert.deepEqual(classifyReadCommand(`cat "${path}"`), {
+    kind: "reads", paths: [path], successProvenPaths: [path],
+  });
+  assert.deepEqual(classifyReadCommand(`echo "${path}"`), { kind: "negative" });
+  assert.deepEqual(classifyReadCommand(`cat "${path}.bak"`), { kind: "negative" });
+  assert.deepEqual(classifyReadCommand(`cat "${path}" || true`), {
+    kind: "reads", paths: [path], successProvenPaths: [],
+  });
+});
+
 test("recognizes supported successful entry reads without executing shell", () => {
   assert.deepEqual(
     classifyReadCommand("sed -n '1,260p' '/skills/brainstorming/SKILL.md'"),

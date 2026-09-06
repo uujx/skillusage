@@ -1,13 +1,42 @@
 import assert from "node:assert/strict";
 import { access, mkdtemp, mkdir, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import { CodexSkillScanner, scanFile } from "../../src/codex/scan.js";
 import { resolveInventory } from "../../src/codex/inventory.js";
 import { analyzeSkillUsage } from "../../src/core/analyze.js";
 import { renderJson } from "../../src/render/json.js";
+
+for (const format of ["xml", "markdown"] as const) {
+  test(`recognizes removed Windows entry from ${format} session catalog`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "skillusage-windows-catalog-"));
+    const entry = String.raw`C:\historical\removed\demo\SKILL.md`;
+    const catalog = format === "xml"
+      ? `<name>demo</name><path>${entry}</path>`
+      : `- demo (file: ${entry})`;
+    await mkdir(join(root, "sessions"), { recursive: true });
+    await writeFile(join(root, "sessions", "windows.jsonl"), [
+      // Keep the same resolution base on POSIX hosts, where a drive path is relative.
+      { type: "session_meta", payload: { id: "windows", cwd: process.cwd(), base_instructions: { text: catalog } } },
+      { type: "turn_context", payload: { turn_id: "turn-1" } },
+      { timestamp: "2026-08-31T02:00:00Z", type: "response_item", payload: {
+        type: "custom_tool_call", name: "exec", call_id: "windows-call",
+        input: `const r = await tools.exec_command({ cmd: ${JSON.stringify(`cat "${entry}"`)} });`,
+      } },
+      { timestamp: "2026-08-31T02:00:01Z", type: "response_item", payload: {
+        type: "custom_tool_call_output", call_id: "windows-call", output: '{"exit_code":0}',
+      } },
+    ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+    const scan = await new CodexSkillScanner().scan({
+      range: { kind: "bounded", from: "2026-08-31T00:00:00Z", untilExclusive: "2026-09-01T00:00:00Z" },
+      timezone: "UTC", codexHome: root, jobs: 1,
+    });
+    assert.deepEqual(scan.sessions[0]?.loads.map((load) => load.skill.name), ["demo"]);
+    assert.equal(scan.sessions[0]?.unresolvedLoadCandidates, 0);
+  });
+}
 
 test("uses injected history root without changing inventory identity", async () => {
   const inventoryRoot = await mkdtemp(join(tmpdir(), "skillusage-inventory-"));
@@ -139,7 +168,7 @@ test("deduplicates call_id only among sources selected for requested date range"
     type: "response_item",
     payload: {
       type: "custom_tool_call", name: "exec", call_id: "fork-call",
-      input: `const r = await tools.exec_command({ cmd: "sed -n '1,20p' ${skillPath} && git status --short" }); text(r.output);`,
+      input: `const r = await tools.exec_command({ cmd: ${JSON.stringify(`sed -n '1,20p' ${skillPath} && git status --short`)} }); text(r.output);`,
     },
   });
   const output = JSON.stringify({
@@ -226,9 +255,9 @@ test("resolves unique project selector into report-ready ProjectRef", async () =
   ].join("\n") + "\n");
   const scan = await new CodexSkillScanner().scan({
     range: { kind: "bounded", from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
-    timezone: "UTC", codexHome: root, jobs: 1, projectSelector: root.split("/").at(-1),
+    timezone: "UTC", codexHome: root, jobs: 1, projectSelector: basename(root),
   });
-  assert.equal(scan.project?.name, root.split("/").at(-1));
+  assert.equal(scan.project?.name, basename(root));
   assert.ok(scan.inventory.skills.some((skill) => skill.name === "local"));
   assert.equal(scan.sessions[0]?.loads[0]?.skill.name, "local");
 });
@@ -379,7 +408,7 @@ test("uses Session catalog for removed entry paths and pairs one custom exec wit
       timestamp: "2026-08-31T02:00:00.000Z", type: "response_item",
       payload: {
         type: "custom_tool_call", name: "exec", call_id: "multi-custom",
-        input: `const a = await tools.exec_command({ cmd: "cat ${oldAlpha}" }); const b = await tools.exec_command({ cmd: "cat ${oldBeta}" });`,
+        input: `const a = await tools.exec_command({ cmd: ${JSON.stringify(`cat ${oldAlpha}`)} }); const b = await tools.exec_command({ cmd: ${JSON.stringify(`cat ${oldBeta}`)} });`,
       },
     }),
     JSON.stringify({ timestamp: "2026-08-31T02:00:01.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "multi-custom", output: "{\"exit_code\":0}" } }),
@@ -427,7 +456,7 @@ test("uses paired custom output entry name when fallback control flow has no str
   await writeFile(join(root, "sessions", "output.jsonl"), [
     JSON.stringify({ type: "session_meta", payload: { id: "output-session", cwd: root } }),
     JSON.stringify({ type: "turn_context", payload: { turn_id: "output-turn" } }),
-    JSON.stringify({ timestamp: "2026-08-31T02:00:00.000Z", type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "output-name", input: `const r = await tools.exec_command({ cmd: "cat ${skillPath} || true" }); text(r.output);` } }),
+    JSON.stringify({ timestamp: "2026-08-31T02:00:00.000Z", type: "response_item", payload: { type: "custom_tool_call", name: "exec", call_id: "output-name", input: `const r = await tools.exec_command({ cmd: ${JSON.stringify(`cat ${skillPath} || true`)} }); text(r.output);` } }),
     JSON.stringify({ timestamp: "2026-08-31T02:00:01.000Z", type: "response_item", payload: { type: "custom_tool_call_output", call_id: "output-name", output: "name: named-output" } }),
   ].join("\n") + "\n");
 

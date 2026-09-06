@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { mkdtemp } from "node:fs/promises";
 import test from "node:test";
@@ -19,7 +19,7 @@ test("uses Git repository root for readable project identity", async () => {
 
   const project = await projectFromCwd(nested);
 
-  assert.equal(project.ref.name, root.split("/").at(-1));
+  assert.equal(project.ref.name, basename(root));
   assert.match(project.ref.id, /^[a-f0-9]{64}$/);
   assert.equal(project.root, root);
 });
