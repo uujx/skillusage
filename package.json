@@ -1,6 +1,6 @@
 {
   "name": "@uujx/skillusage",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "See which Codex skills you use most, with local reports by date and project.",
   "license": "MIT",
   "repository": {
@@ -14,7 +14,7 @@
   "keywords": ["codex", "skills", "cli", "analytics", "local-first"],
   "type": "module",
   "bin": {
-    "skillusage": "./dist/cli/main.js"
+    "skillusage": "dist/cli/main.js"
   },
   "files": [
     "dist",

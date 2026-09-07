@@ -56,7 +56,7 @@ export async function runCli(args: string[], io: CliIo = process): Promise<numbe
       return 0;
     }
     if (options.version) {
-      io.stdout.write("0.1.1\n");
+      io.stdout.write("0.1.2\n");
       return 0;
     }
     let wroteProgress = false;
@@ -80,7 +80,7 @@ export async function runCli(args: string[], io: CliIo = process): Promise<numbe
       io.stderr.write("No recognizable Codex history found. Use --codex-home to select another local directory.\n");
       return 2;
     }
-    const report = analyzeSkillUsage(options.request, scan, "0.1.1");
+    const report = analyzeSkillUsage(options.request, scan, "0.1.2");
     io.stdout.write(options.json ? renderJson(report) : renderTerminal(report, {
       isTTY: Boolean(io.stdout.isTTY),
       columns: io.stdout.columns,
