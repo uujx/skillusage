@@ -1,6 +1,6 @@
 {
   "name": "@uujx/skillusage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "See which Codex skills you use most, with local reports by date and project.",
   "license": "MIT",
   "repository": {
