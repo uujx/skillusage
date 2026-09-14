@@ -2,7 +2,7 @@
 
 This file records repository iterations in reverse chronological order. An entry describes verified code changes; it does not by itself mean that the package was published to npm.
 
-## 1.0.0 — 2026-09-14
+## 1.0.0 — Unreleased (2026-09-14)
 
 - Correct `--requested` to count only new, direct human `$skill` messages. Copied fork context, subagent task context, automatic goals, injected Skill bodies, and ambiguous metadata no longer inflate the ranking; unresolved evidence is surfaced through JSON coverage.
 - Keep Loaded independent of Requested collection. Proven inherited Loads are merged by call ID or strong turn identity, while ambiguous no-ID records remain visible and lower coverage rather than being silently discarded.
