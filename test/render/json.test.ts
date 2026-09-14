@@ -5,12 +5,14 @@ import { renderJson } from "../../src/render/json.js";
 
 test("renders deterministic newline-terminated JSON", () => {
   const value = {
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     tool_version: "0.1.0",
     query: { platform: "codex", range: { kind: "all", as_of: "2026-08-31T00:00:00.000Z" }, timezone: "UTC" },
-    coverage: { history_complete: true, inventory_status: "complete", files_scanned: 0, bytes_scanned: 0, sessions_scanned: 0, unreadable_records: 0, unresolved_load_candidates: 0, unresolved_inventory_sources: 0 },
-    summary: { loads: 0, sessions_with_loads: 0 },
+    coverage: { history_complete: true, request_history_complete: true, inventory_status: "complete", files_scanned: 0, bytes_scanned: 0, sessions_scanned: 0, unreadable_records: 0, unresolved_load_candidates: 0, unresolved_request_candidates: 0, unresolved_inventory_sources: 0 },
+    summary: { loads: 0, sessions_with_loads: 0, requests: 0, sessions_with_requests: 0 },
+    activity: [],
     skills: [],
+    requested_skills: [],
     zero_load_skills: [],
   } as const;
   assert.equal(renderJson(value), `${JSON.stringify(value, null, 2)}\n`);

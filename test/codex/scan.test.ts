@@ -62,6 +62,280 @@ test("uses injected history root without changing inventory identity", async () 
   assert.deepEqual(scan.sessions[0]?.loads.map((load) => load.skill.name), ["benchmark"]);
 });
 
+test("records only explicit user $skill requests and deduplicates history copies", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-"));
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "brainstorming"), { recursive: true });
+  await writeFile(join(root, "skills", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Test\n---\n");
+  await writeFile(join(root, "sessions", "rollout.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "request-session", cwd: root } }),
+    JSON.stringify({ timestamp: "2026-08-31T01:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "$brainstorming $brainstorming and $HOME, brainstorming, $missing" }] } }),
+    JSON.stringify({ timestamp: "2026-08-31T01:00:01.000Z", type: "response_item", payload: { type: "message", role: "developer", content: [{ type: "input_text", text: "$brainstorming" }] } }),
+  ].join("\n") + "\n");
+  await writeFile(join(root, "history.jsonl"), JSON.stringify({ session_id: "request-session", ts: "2026-08-31T01:00:00.000Z", text: "$brainstorming $brainstorming and $HOME, brainstorming, $missing" }) + "\n");
+  const scan = await new CodexSkillScanner().scan({
+    range: { kind: "bounded", from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1,
+  });
+  assert.deepEqual(scan.sessions[0]?.requests.map((item) => item.skill.name), ["brainstorming"]);
+  assert.equal(scan.sessions[0]?.unresolvedRequestCandidates, 2);
+});
+
+test("deduplicates a copied Requested occurrence across Sessions but keeps a later repeat", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-fork-"));
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(join(root, "skills", "caveman", "SKILL.md"), "---\nname: caveman\ndescription: Test\n---\n");
+  const userMessage = (timestamp: string) => JSON.stringify({
+    timestamp,
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text: "$caveman" }] },
+  });
+  await writeFile(join(root, "sessions", "parent.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "parent", cwd: root, source: "vscode" } }),
+    userMessage("2026-08-31T01:00:00.000Z"),
+    userMessage("2026-08-31T03:00:00.000Z"),
+  ].join("\n") + "\n");
+  await writeFile(join(root, "sessions", "fork.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "fork", cwd: root, source: "vscode", forked_from_id: "parent" } }),
+    userMessage("2026-08-31T01:00:00.000Z"),
+  ].join("\n") + "\n");
+
+  const scan = await new CodexSkillScanner().scan({
+    range: { kind: "bounded", from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1,
+  });
+
+  const report = analyzeSkillUsage({
+    range: { kind: "bounded", from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1,
+  }, scan, "1.0.0");
+  assert.equal(report.summary.requests, 2);
+  assert.equal(report.requested_skills[0]?.requests, 2);
+});
+
+test("keeps Loaded stable when Requested collection is disabled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-toggle-"));
+  const skillPath = join(root, "skills", "caveman", "SKILL.md");
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(skillPath, "---\nname: caveman\ndescription: Test\n---\n");
+  await writeFile(join(root, "sessions", "toggle.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "toggle", cwd: root } }),
+    JSON.stringify({ timestamp: "2026-08-31T01:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "work" }] } }),
+    JSON.stringify({ timestamp: "2026-08-31T01:00:01.000Z", type: "response_item", payload: { type: "function_call", name: "exec_command", call_id: "toggle-call", arguments: JSON.stringify({ cmd: `cat ${skillPath}` }) } }),
+    JSON.stringify({ timestamp: "2026-08-31T01:00:02.000Z", type: "response_item", payload: { type: "function_call_output", call_id: "toggle-call", output: "{\"exit_code\":0}" } }),
+  ].join("\n") + "\n");
+  const base = {
+    range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1 as const,
+  };
+  const without = await new CodexSkillScanner().scan({ ...base, includeRequested: false });
+  const withRequests = await new CodexSkillScanner().scan({ ...base, includeRequested: true });
+  assert.deepEqual(without.sessions[0]?.loads, withRequests.sessions[0]?.loads);
+  assert.equal(without.sessions[0]?.loads.length, 1);
+});
+
+test("counts only the original user request across inherited and internal messages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-lineage-"));
+  const skillPath = join(root, "skills", "caveman", "SKILL.md");
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(skillPath, "---\nname: caveman\ndescription: Test\n---\n");
+  const user = (timestamp: string, text: string) => JSON.stringify({
+    timestamp, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+  });
+  await writeFile(join(root, "sessions", "parent.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "parent", cwd: root, source: "vscode" } }),
+    user("2026-08-31T01:00:00.000Z", "$caveman"),
+  ].join("\n") + "\n");
+  await writeFile(join(root, "sessions", "fork.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "fork", cwd: root, source: "vscode", forked_from_id: "parent" } }),
+    user("2026-08-31T02:00:00.000Z", "$caveman"),
+    user("2026-08-31T03:00:00.000Z", "$caveman"),
+  ].join("\n") + "\n");
+  await writeFile(join(root, "sessions", "child.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: {
+      id: "child", cwd: root, source: { subagent: { thread_spawn: { parent_thread_id: "parent", depth: 1 } } }, forked_from_id: "parent",
+    } }),
+    user("2026-08-31T04:00:00.000Z", "$caveman"),
+    user("2026-08-31T04:00:01.000Z", '<codex_internal_context source="goal"><objective>$caveman</objective></codex_internal_context>'),
+    user("2026-08-31T04:00:02.000Z", "<skill>\n<name>caveman</name>\n$ caveman\n</skill>"),
+    JSON.stringify({ type: "turn_context", payload: { turn_id: "child-turn" } }),
+    JSON.stringify({ timestamp: "2026-08-31T04:00:03.000Z", type: "response_item", payload: { type: "function_call", name: "exec_command", call_id: "child-load", arguments: JSON.stringify({ cmd: `cat ${skillPath}` }) } }),
+    JSON.stringify({ timestamp: "2026-08-31T04:00:04.000Z", type: "response_item", payload: { type: "function_call_output", call_id: "child-load", output: "{\"exit_code\":0}" } }),
+  ].join("\n") + "\n");
+  const request = {
+    range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1 as const,
+  };
+  const report = analyzeSkillUsage(request, await new CodexSkillScanner().scan(request), "1.0.0");
+  assert.equal(report.summary.requests, 2);
+  assert.equal(report.requested_skills[0]?.sessions, 2);
+  assert.equal(report.summary.loads, 1);
+  assert.equal(report.skills[0]?.sessions, 1);
+});
+
+test("keeps independent same-time requests and marks an unavailable fork parent unresolved", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-parent-gap-"));
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(join(root, "skills", "caveman", "SKILL.md"), "---\nname: caveman\ndescription: Test\n---\n");
+  const user = (id: string, timestamp: string, parent?: string) => [
+    JSON.stringify({ type: "session_meta", payload: { id, cwd: root, source: "vscode", ...(parent ? { forked_from_id: parent } : {}) } }),
+    JSON.stringify({ timestamp, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "$caveman" }] } }),
+  ].join("\n") + "\n";
+  await writeFile(join(root, "sessions", "left.jsonl"), user("left", "2026-08-31T01:00:00.000Z"));
+  await writeFile(join(root, "sessions", "right.jsonl"), user("right", "2026-08-31T01:00:00.000Z"));
+  await writeFile(join(root, "sessions", "orphan.jsonl"), user("orphan", "2026-08-31T02:00:00.000Z", "missing-parent"));
+  const request = {
+    range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1 as const,
+  };
+  const report = analyzeSkillUsage(request, await new CodexSkillScanner().scan(request), "1.0.0");
+  assert.equal(report.summary.requests, 2);
+  assert.equal(report.coverage.unresolved_request_candidates, 1);
+  assert.equal(report.coverage.request_history_complete, false);
+});
+
+test("does not recover Requested facts for a subagent from history.jsonl", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-subagent-history-"));
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(join(root, "skills", "caveman", "SKILL.md"), "---\nname: caveman\ndescription: Test\n---\n");
+  await writeFile(join(root, "sessions", "child.jsonl"), JSON.stringify({ type: "session_meta", payload: {
+    id: "child", cwd: root, source: { subagent: { thread_spawn: { parent_thread_id: "parent", depth: 1 } } },
+  } }) + "\n");
+  await writeFile(join(root, "history.jsonl"), JSON.stringify({ session_id: "child", ts: "2026-08-31T01:00:00.000Z", text: "$caveman" }) + "\n");
+  const request = {
+    range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1 as const,
+  };
+  const report = analyzeSkillUsage(request, await new CodexSkillScanner().scan(request), "1.0.0");
+  assert.equal(report.summary.requests, 0);
+});
+
+test("keeps the first session identity and makes conflicting metadata Requested-unresolved", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-metadata-conflict-"));
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(join(root, "skills", "caveman", "SKILL.md"), "---\nname: caveman\ndescription: Test\n---\n");
+  const message = (timestamp: string) => JSON.stringify({
+    timestamp, type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "$caveman" }] },
+  });
+  await writeFile(join(root, "sessions", "conflict.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "canonical", cwd: root, source: "vscode" } }),
+    message("2026-08-31T01:00:00.000Z"),
+    JSON.stringify({ type: "session_meta", payload: { id: "mirror", cwd: root, source: "vscode" } }),
+    message("2026-08-31T02:00:00.000Z"),
+  ].join("\n") + "\n");
+  const request = {
+    range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1 as const,
+  };
+  const scan = await new CodexSkillScanner().scan(request);
+  assert.equal(scan.sessions[0]?.sessionKey, "canonical");
+  const report = analyzeSkillUsage(request, scan, "1.0.0");
+  assert.equal(report.summary.requests, 0);
+  assert.equal(report.coverage.unresolved_request_candidates, 2);
+  assert.equal(report.coverage.request_history_complete, false);
+});
+
+test("uses an out-of-range parent only to keep an inherited request out of the child range", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-requested-auxiliary-parent-"));
+  const parentDir = join(root, "sessions", "2026", "08", "30");
+  const childDir = join(root, "sessions", "2026", "08", "31");
+  await mkdir(parentDir, { recursive: true });
+  await mkdir(childDir, { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(join(root, "skills", "caveman", "SKILL.md"), "---\nname: caveman\ndescription: Test\n---\n");
+  const parentPath = join(parentDir, "rollout-2026-08-30T01-00-00-parent.jsonl");
+  await writeFile(parentPath, [
+    JSON.stringify({ type: "session_meta", payload: { id: "parent", cwd: root, source: "vscode" } }),
+    JSON.stringify({ timestamp: "2026-08-30T01:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "$caveman" }] } }),
+  ].join("\n") + "\n");
+  await utimes(parentPath, new Date("2026-08-30T02:00:00.000Z"), new Date("2026-08-30T02:00:00.000Z"));
+  await writeFile(join(childDir, "rollout-2026-08-31T01-00-00-child.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "child", cwd: root, source: "vscode", forked_from_id: "parent" } }),
+    JSON.stringify({ timestamp: "2026-08-31T01:00:00.000Z", type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "$caveman" }] } }),
+  ].join("\n") + "\n");
+  const request = {
+    range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1 as const,
+  };
+  const scan = await new CodexSkillScanner().scan(request);
+  const report = analyzeSkillUsage(request, scan, "1.0.0");
+  assert.equal(scan.sourceStats.filesScanned, 2);
+  assert.equal(report.summary.requests, 0);
+  assert.equal(report.coverage.unresolved_request_candidates, 0);
+});
+
+test("keeps a child no-call-id Load only when it is a new turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-load-lineage-"));
+  const skillPath = join(root, "skills", "caveman", "SKILL.md");
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(skillPath, "---\nname: caveman\ndescription: Test\n---\n");
+  const load = (turn: string, timestamp: string) => [
+    JSON.stringify({ type: "turn_context", payload: { turn_id: turn } }),
+    JSON.stringify({ timestamp, payload: { item: { type: "CommandExecution", status: "completed", exit_code: 0, command: `cat ${skillPath}` } } }),
+  ];
+  await writeFile(join(root, "sessions", "parent.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "parent", cwd: root, source: "vscode" } }),
+    ...load("copied-turn", "2026-08-31T01:00:00.000Z"),
+  ].join("\n") + "\n");
+  await writeFile(join(root, "sessions", "child.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "child", cwd: root, source: "vscode", forked_from_id: "parent" } }),
+    ...load("copied-turn", "2026-08-31T02:00:00.000Z"),
+    ...load("new-child-turn", "2026-08-31T03:00:00.000Z"),
+  ].join("\n") + "\n");
+  const reports = new Set<string>();
+  for (const jobs of [1, 2, 3, 4] as const) {
+    const request = {
+      range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+      timezone: "UTC", codexHome: root, jobs,
+    };
+    const without = await new CodexSkillScanner().scan({ ...request, includeRequested: false });
+    const withRequests = await new CodexSkillScanner().scan({ ...request, includeRequested: true });
+    const withoutReport = analyzeSkillUsage(request, without, "1.0.0");
+    const withReport = analyzeSkillUsage(request, withRequests, "1.0.0");
+    assert.equal(withoutReport.summary.loads, 2);
+    assert.equal(withReport.summary.loads, 2);
+    assert.deepEqual(withoutReport.skills, withReport.skills);
+    reports.add(renderJson(withReport));
+  }
+  assert.equal(reports.size, 1);
+});
+
+test("keeps ambiguous no-call-id fork Loads but exposes incomplete coverage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "skillusage-load-ambiguous-lineage-"));
+  const skillPath = join(root, "skills", "caveman", "SKILL.md");
+  await mkdir(join(root, "sessions"), { recursive: true });
+  await mkdir(join(root, "skills", "caveman"), { recursive: true });
+  await writeFile(skillPath, "---\nname: caveman\ndescription: Test\n---\n");
+  const load = (timestamp: string) => JSON.stringify({
+    timestamp, payload: { item: { type: "CommandExecution", status: "completed", exit_code: 0, command: `cat ${skillPath}` } },
+  });
+  await writeFile(join(root, "sessions", "parent.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "parent", cwd: root, source: "vscode" } }),
+    JSON.stringify({ type: "task_started" }),
+    load("2026-08-31T01:00:00.000Z"),
+  ].join("\n") + "\n");
+  await writeFile(join(root, "sessions", "child.jsonl"), [
+    JSON.stringify({ type: "session_meta", payload: { id: "child", cwd: root, source: "vscode", forked_from_id: "parent" } }),
+    JSON.stringify({ type: "task_started" }),
+    load("2026-08-31T02:00:00.000Z"),
+  ].join("\n") + "\n");
+  const request = {
+    range: { kind: "bounded" as const, from: "2026-08-31T00:00:00.000Z", untilExclusive: "2026-09-01T00:00:00.000Z" },
+    timezone: "UTC", codexHome: root, jobs: 1 as const,
+  };
+  const report = analyzeSkillUsage(request, await new CodexSkillScanner().scan(request), "1.0.0");
+  assert.equal(report.summary.loads, 2);
+  assert.equal(report.coverage.unresolved_load_candidates, 1);
+  assert.equal(report.coverage.history_complete, false);
+});
+
 test("scans successful CommandExecution entry read against current inventory", async () => {
   const root = await mkdtemp(join(tmpdir(), "skillusage-"));
   const skillPath = join(root, "skills", "brainstorming", "SKILL.md");
@@ -274,9 +548,14 @@ test("keeps oversized irrelevant record out of coverage but flags relevant unkno
   let scan = await new CodexSkillScanner().scan(baseRequest);
   assert.equal(scan.sessions[0]?.unreadableRecords, 0);
 
-  await writeFile(join(root, "sessions", "relevant.jsonl"), `${padding} CommandExecution\n`);
+  await writeFile(join(root, "sessions", "requested.jsonl"), `${padding} $caveman\n`);
   scan = await new CodexSkillScanner().scan(baseRequest);
   assert.ok(scan.sessions.some((session) => session.unreadableRecords === 1));
+  assert.equal(scan.sourceStats.requestUnreadableRecords, 1);
+
+  await writeFile(join(root, "sessions", "relevant.jsonl"), `${padding} CommandExecution\n`);
+  scan = await new CodexSkillScanner().scan(baseRequest);
+  assert.equal(scan.sessions.filter((session) => session.unreadableRecords === 1).length, 2);
 });
 
 test("uses raw bytes for the oversized EOF boundary", async () => {

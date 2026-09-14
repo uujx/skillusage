@@ -1,6 +1,6 @@
 {
   "name": "@uujx/skillusage",
-  "version": "0.1.2",
+  "version": "1.0.0",
   "description": "See which Codex skills you use most, with local reports by date and project.",
   "license": "MIT",
   "repository": {
@@ -21,6 +21,7 @@
     "assets/terminal-preview.txt",
     "README.md",
     "README.zh-CN.md",
+    "RELEASE_NOTES.md",
     "LICENSE"
   ],
   "engines": {

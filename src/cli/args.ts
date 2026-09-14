@@ -6,6 +6,9 @@ import type { AnalysisRequest } from "../core/types.js";
 export interface CliOptions {
   request: AnalysisRequest;
   json: boolean;
+  requested: boolean;
+  limit: number;
+  showZero: boolean;
   help: boolean;
   version: boolean;
 }
@@ -84,6 +87,10 @@ export function parseCliArgs(args: string[], now = new Date()): CliOptions {
   let codexHome = join(homedir(), ".codex");
   let jobs = 4 as 1 | 2 | 3 | 4;
   let json = false;
+  let requested = false;
+  let limit = 0;
+  let limitProvided = false;
+  let showZero = false;
   let help = false;
   let version = false;
 
@@ -99,6 +106,9 @@ export function parseCliArgs(args: string[], now = new Date()): CliOptions {
       case "--codex-home": codexHome = requireValue(args, index, flag); index += 1; break;
       case "--jobs": jobs = Number(requireValue(args, index, flag)) as 1 | 2 | 3 | 4; index += 1; break;
       case "--json": json = true; break;
+      case "--requested": requested = true; break;
+      case "--limit": limit = Number(requireValue(args, index, flag)); limitProvided = true; index += 1; break;
+      case "--show-zero": showZero = true; break;
       case "--help": case "-h": help = true; break;
       case "--version": case "-v": version = true; break;
       default: throw new Error(`unknown option: ${flag}`);
@@ -109,6 +119,9 @@ export function parseCliArgs(args: string[], now = new Date()): CliOptions {
     throw new Error("--days must be 7, 30, or 90");
   }
   if (jobs < 1 || jobs > 4 || !Number.isInteger(jobs)) throw new Error("--jobs must be 1 through 4");
+  if (!Number.isSafeInteger(limit) || limit < 0) throw new Error("--limit must be a non-negative safe integer");
+  if (requested && showZero) throw new Error("--show-zero is only available for Loaded output");
+  if (json && (requested || limitProvided || showZero)) throw new Error("--json always returns the complete report and cannot be combined with display options");
   if (Number(Boolean(days)) + Number(Boolean(from || until)) + Number(all) > 1) throw new Error("date modes are mutually exclusive");
   if (Boolean(from) !== Boolean(until)) throw new Error("--from and --until must be used together");
 
@@ -124,5 +137,8 @@ export function parseCliArgs(args: string[], now = new Date()): CliOptions {
       untilExclusive: zonedMidnight(incrementDate(end, 1), timezone),
     };
   }
-  return { request: { range, timezone, projectSelector, codexHome, jobs }, json, help, version };
+  return {
+    request: { range, timezone, projectSelector, codexHome, jobs, includeRequested: requested || json },
+    json, requested, limit, showZero, help, version,
+  };
 }

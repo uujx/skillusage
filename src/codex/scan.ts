@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join, normalize, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 
@@ -80,6 +81,80 @@ async function discover(codexHome: string, request: AnalysisRequest): Promise<Se
   return files;
 }
 
+async function firstSessionMeta(file: SessionFile): Promise<Record<string, unknown> | undefined> {
+  if (file.sizeBytes === 0) return undefined;
+  const stream = createReadStream(file.path, {
+    end: Math.min(file.sizeBytes - 1, 1024 * 1024 - 1),
+    encoding: "utf8",
+  });
+  let remainder = "";
+  try {
+    for await (const chunk of stream) {
+      const parts = (remainder + chunk).split("\n");
+      remainder = parts.pop() ?? "";
+      for (const line of parts) {
+        if (!line) continue;
+        try {
+          const root = JSON.parse(line) as Record<string, unknown>;
+          const payload = asObject(root.payload);
+          if (root.type === "session_meta" || payload?.type === "session_meta") return payload ?? root;
+        } catch { /* keep searching the bounded prefix */ }
+      }
+    }
+  } finally {
+    stream.destroy();
+  }
+  return undefined;
+}
+
+async function expandLineageParents(files: SessionFile[], codexHome: string): Promise<SessionFile[]> {
+  const selected = new Map(files.map((file) => [file.path, file]));
+  const metaByPath = new Map<string, Record<string, unknown>>();
+  const parentIds = new Set<string>();
+  const inspect = async (file: SessionFile) => {
+    const meta = await firstSessionMeta(file);
+    if (!meta) return;
+    metaByPath.set(file.path, meta);
+    const parent = metaParentSessionKey(meta);
+    if (parent) parentIds.add(parent);
+  };
+  for (const file of files) await inspect(file);
+  if (parentIds.size === 0) return files;
+
+  const allPaths = [
+    ...await walk(join(codexHome, "sessions")),
+    ...await walk(join(codexHome, "archived_sessions")),
+  ].sort();
+  const unresolved = new Set(parentIds);
+  for (;;) {
+    const needed = [...unresolved];
+    if (needed.length === 0) break;
+    unresolved.clear();
+    let added = false;
+    for (const parentId of needed) {
+      const matches = allPaths.filter((path) => path.includes(parentId));
+      for (const path of matches) {
+        if (selected.has(path)) continue;
+        try {
+          const info = await stat(path);
+          const file: SessionFile = { path, sizeBytes: info.size, mtimeMs: info.mtimeMs, ordinal: 0 };
+          const meta = await firstSessionMeta(file);
+          if (textAt(meta ?? {}, "id") !== parentId) continue;
+          selected.set(path, file);
+          metaByPath.set(path, meta!);
+          const grandparent = metaParentSessionKey(meta!);
+          if (grandparent) unresolved.add(grandparent);
+          added = true;
+        } catch { /* unavailable auxiliary source remains unresolved later */ }
+      }
+    }
+    if (!added) break;
+  }
+  return [...selected.values()]
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map((file, ordinal) => ({ ...file, ordinal }));
+}
+
 async function* lines(
   path: string,
   sizeLimit: number,
@@ -91,7 +166,7 @@ async function* lines(
     encoding: undefined,
     ...(frozenSize > 0 ? { end: frozenSize - 1 } : {}),
   });
-  const marker = /CommandExecution|function_call|SKILL\.md|turn_context|session_meta/;
+  const marker = /CommandExecution|function_call|SKILL\.md|turn_context|session_meta|\$[a-z][a-z0-9-]*/i;
   let pieces: Buffer[] = [];
   let recordBytes = 0;
   let oversized = false;
@@ -160,6 +235,39 @@ function textAt(record: Record<string, unknown>, key: string): string | undefine
   return typeof record[key] === "string" ? record[key] : undefined;
 }
 
+function messageText(payload: Record<string, unknown>): string | undefined {
+  if (!Array.isArray(payload.content)) return undefined;
+  const parts = payload.content.flatMap((block) => {
+    const value = asObject(block);
+    return value?.type === "input_text" && typeof value.text === "string" ? [value.text] : [];
+  });
+  return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+function requestTokens(text: string): string[] {
+  return [...new Set([...text.matchAll(/\$([a-z][a-z0-9-]*)\b/g)].map((match) => match[1]!.normalize("NFKC").toLocaleLowerCase("en-US")))];
+}
+
+function requestFingerprint(text: string): string {
+  return createHash("sha256").update(text.normalize("NFKC").replace(/\s+/g, " ").trim()).digest("hex");
+}
+
+function metaParentSessionKey(meta: Record<string, unknown>): string | undefined {
+  const source = asObject(meta.source);
+  const subagent = asObject(source?.subagent);
+  const spawned = asObject(subagent?.thread_spawn);
+  return textAt(spawned ?? {}, "parent_thread_id") ?? textAt(meta, "forked_from_id");
+}
+
+function metaIsSubagent(meta: Record<string, unknown>): boolean {
+  return Boolean(asObject(asObject(meta.source)?.subagent));
+}
+
+function isGeneratedUserMessage(text: string): boolean {
+  const trimmed = text.trimStart();
+  return /^<codex_internal_context\b[^>]*\bsource="goal"/.test(trimmed) || trimmed.startsWith("<skill>");
+}
+
 function resolveSkill(path: string, cwd: string | undefined, inventory: ResolvedInventory) {
   const entry = normalize(resolve(cwd ?? "/", path));
   return inventory.aliases.get(entry) ?? knownRootSkill(entry, inventory.acceptedRoots);
@@ -219,11 +327,14 @@ export async function scanFile(
   inventory: ResolvedInventory,
   onBytes?: (delta: number) => void,
 ): Promise<FileResult> {
+  const collectRequests = request.includeRequested ?? true;
   const session: ScannedSession = {
     sessionKey: basename(file.path),
     loads: [],
+    requests: [],
     unreadableRecords: 0,
     unresolvedLoadCandidates: 0,
+    unresolvedRequestCandidates: 0,
   };
   let cwd: string | undefined;
   let contextOrdinal = 0;
@@ -252,7 +363,9 @@ export async function scanFile(
     recordOrdinal: number;
   };
   type Pending = { commands: Array<{ command: string; cwd?: string }>; explicitTurn?: string; occurredAt?: string; boundary: Boundary; recordOrdinal: number };
+  type RequestCandidate = { token: string; occurredAt: string; turnKey: string; fingerprint: string; messageOrdinal: number; recordOrdinal: number };
   const candidates: Candidate[] = [];
+  const requestCandidates: RequestCandidate[] = [];
   const currentBoundary = (): Boundary => ({ context: contextOrdinal, task: taskOrdinal, user: userOrdinal });
   const qualityInRange = (timestamp: string | undefined) => {
     if (!timestamp) return true;
@@ -324,8 +437,12 @@ export async function scanFile(
         if (!primarySessionMetaSeen) {
           primarySessionMetaSeen = true;
           session.sessionKey = textAt(meta, "id") ?? session.sessionKey;
+          session.parentSessionKey = metaParentSessionKey(meta);
+          session.isSubagent = metaIsSubagent(meta);
           cwd = textAt(meta, "cwd") ?? cwd;
           sessionSkillSource = meta;
+        } else if (textAt(meta, "id") && textAt(meta, "id") !== session.sessionKey) {
+          session.metadataConflict = true;
         }
       }
       const context = root.type === "turn_context" ? root : payload?.type === "turn_context" ? payload : undefined;
@@ -336,6 +453,22 @@ export async function scanFile(
       const recordType = typeof root.type === "string" ? root.type : textAt(payload ?? {}, "type");
       if (recordType === "task_started") taskOrdinal += 1;
       if (["user_message", "userMessage"].includes(recordType ?? "")) userOrdinal += 1;
+      if (root.type === "response_item" && payload?.type === "message" && payload.role === "user") {
+        const text = messageText(payload);
+        const timestamp = textAt(root, "timestamp");
+        userOrdinal += 1;
+        if (!collectRequests || !text || isGeneratedUserMessage(text)) continue;
+        if (!timestamp || Number.isNaN(Date.parse(timestamp))) {
+          if (text.includes("$")) session.unresolvedRequestCandidates += 1;
+        } else {
+          const tokens = text.includes("$") ? requestTokens(text) : [];
+          if (tokens.length === 0) continue;
+          const fingerprint = requestFingerprint(text);
+          for (const token of tokens) {
+            requestCandidates.push({ token, occurredAt: new Date(timestamp).toISOString(), turnKey: `user-message-${userOrdinal}`, fingerprint, messageOrdinal: userOrdinal, recordOrdinal });
+          }
+        }
+      }
       for (const command of nestedCommandExecutions(root)) {
         const timestamp = textAt(root, "timestamp") ?? textAt(payload ?? {}, "timestamp");
         const explicitTurn = textAt(command, "turn_id") ?? textAt(root, "turn_id") ?? textAt(payload ?? {}, "turn_id");
@@ -443,22 +576,46 @@ export async function scanFile(
       }
     }
     for (const [callId, call] of pending) for (const item of call.commands) collect(item.command, undefined, call.occurredAt, item.cwd, call.explicitTurn, call.boundary, callId, new Set(), call.recordOrdinal);
+    if (collectRequests && !session.isSubagent && !session.metadataConflict) {
+      ensureSessionAliases();
+      const requestSkills = new Map<string, ScannedSession["requests"][number]["skill"]>();
+      for (const skill of inventory.result.skills) requestSkills.set(skill.name.normalize("NFKC").toLocaleLowerCase("en-US"), skill);
+      for (const skill of sessionAliases.values()) requestSkills.set(skill.name.normalize("NFKC").toLocaleLowerCase("en-US"), skill);
+      for (const candidate of requestCandidates) {
+        const skill = requestSkills.get(candidate.token);
+        if (!skill) {
+          session.unresolvedRequestCandidates += 1;
+          continue;
+        }
+        session.requests.push({
+          skill,
+          occurredAt: candidate.occurredAt,
+          turnKey: candidate.turnKey,
+          messageFingerprint: candidate.fingerprint,
+          messageOrdinal: candidate.messageOrdinal,
+          sourceOrdinal: file.ordinal,
+          recordOrdinal: candidate.recordOrdinal,
+        });
+      }
+    } else if (collectRequests && session.metadataConflict) {
+      session.unresolvedRequestCandidates += requestCandidates.length;
+    }
     const useExplicit = candidates.some((candidate) => Boolean(candidate.explicitTurn));
     for (const candidate of candidates) {
-      const turnKey = useExplicit
-        ? candidate.explicitTurn
+      const [turnKey, turnEvidence] = useExplicit
+        ? [candidate.explicitTurn, "explicit" as const]
         : contextOrdinal > 0
-          ? candidate.boundary.context > 0 ? contextKeys.get(candidate.boundary.context) : undefined
+          ? candidate.boundary.context > 0 ? [contextKeys.get(candidate.boundary.context), "context" as const] : [undefined, undefined]
           : taskOrdinal > 0
-            ? candidate.boundary.task > 0 ? `task-started-${candidate.boundary.task}` : undefined
+            ? candidate.boundary.task > 0 ? [`task-started-${candidate.boundary.task}`, "task" as const] : [undefined, undefined]
             : userOrdinal > 0 && candidate.boundary.user > 0
-              ? `user-message-${candidate.boundary.user}`
-              : undefined;
+              ? [`user-message-${candidate.boundary.user}`, "user" as const]
+              : [undefined, undefined];
       if (!turnKey) {
         if (qualityInRange(candidate.occurredAt)) session.unresolvedLoadCandidates += 1;
         continue;
       }
-      session.loads.push({ skill: candidate.skill, occurredAt: candidate.occurredAt, turnKey, callId: candidate.callId, sourceOrdinal: file.ordinal, recordOrdinal: candidate.recordOrdinal });
+      session.loads.push({ skill: candidate.skill, occurredAt: candidate.occurredAt, turnKey, callId: candidate.callId, turnEvidence, sourceOrdinal: file.ordinal, recordOrdinal: candidate.recordOrdinal });
     }
     let projectRoots: Array<[string, string]> = [];
     if (cwd && request.projectSelector) {
@@ -470,7 +627,7 @@ export async function scanFile(
     if (current.size < file.sizeBytes || (current.size === file.sizeBytes && current.mtimeMs !== file.mtimeMs)) {
       session.unreadableRecords += 1;
     }
-    return { ordinal: file.ordinal, sessions: [session], bytesScanned: file.sizeBytes, unreadableRecords: 0, projectRoots };
+    return { ordinal: file.ordinal, sessions: [session], bytesScanned: file.sizeBytes, unreadableRecords: session.unreadableRecords, projectRoots };
   } catch {
     return { ordinal: file.ordinal, sessions: [], bytesScanned: 0, unreadableRecords: 1, projectRoots: [] };
   }
@@ -483,7 +640,10 @@ export class CodexSkillScanner implements PlatformSkillScanner {
     request: AnalysisRequest,
     onProgress?: (snapshot: ProgressSnapshot) => void,
   ): Promise<PlatformScanResult> {
-    const files = await discover(this.options.historyHome ?? request.codexHome, request);
+    const collectRequests = request.includeRequested ?? true;
+    const historyHome = this.options.historyHome ?? request.codexHome;
+    let files = await discover(historyHome, request);
+    files = await expandLineageParents(files, historyHome);
     let inventory = await resolveInventory(request.codexHome);
     const totalBytes = files.reduce((sum, file) => sum + file.sizeBytes, 0);
     const started = Date.now();
@@ -578,12 +738,14 @@ export class CodexSkillScanner implements PlatformSkillScanner {
     for (const session of results.flatMap((result) => result.sessions)) {
       const existing = merged.get(session.sessionKey);
       if (!existing) {
-        merged.set(session.sessionKey, { ...session, loads: [...session.loads] });
+        merged.set(session.sessionKey, { ...session, loads: [...session.loads], requests: [...session.requests] });
         continue;
       }
       existing.loads.push(...session.loads);
+      existing.requests.push(...session.requests);
       existing.unreadableRecords += session.unreadableRecords;
       existing.unresolvedLoadCandidates += session.unresolvedLoadCandidates;
+      existing.unresolvedRequestCandidates += session.unresolvedRequestCandidates;
       if (existing.project?.id !== session.project?.id) {
         existing.project = undefined;
         existing.unreadableRecords += 1;
@@ -602,6 +764,106 @@ export class CodexSkillScanner implements PlatformSkillScanner {
         const canonical = canonicalCalls.get(load.callId);
         return canonical?.sessionKey === session.sessionKey && canonical.sourceOrdinal === load.sourceOrdinal && canonical.recordOrdinal === load.recordOrdinal;
       });
+    }
+    for (const session of merged.values()) {
+      if (!session.parentSessionKey) continue;
+      const inheritedWithoutCallId = session.loads.filter((load) => !load.callId);
+      const parent = merged.get(session.parentSessionKey);
+      if (!parent) {
+        session.unresolvedLoadCandidates += inheritedWithoutCallId.length;
+        session.loads = session.loads.filter((load) => load.callId);
+        continue;
+      }
+      const parentLoads = new Set(parent.loads
+        .filter((load) => !load.callId && (load.turnEvidence === "explicit" || load.turnEvidence === "context"))
+        .map((load) => `${load.skill.id}\u0000${load.turnKey}`));
+      session.loads = session.loads.filter((load) => {
+        if (load.callId) return true;
+        if (load.turnEvidence !== "explicit" && load.turnEvidence !== "context") {
+          session.unresolvedLoadCandidates += 1;
+          return true;
+        }
+        return !parentLoads.has(`${load.skill.id}\u0000${load.turnKey}`);
+      });
+    }
+    let requestUnreadableRecords = collectRequests ? results.reduce((sum, result) => sum + result.unreadableRecords, 0) : 0;
+    if (collectRequests) try {
+      const history = await readFile(join(historyHome, "history.jsonl"), "utf8");
+      const skillsByName = new Map(inventory.result.skills.map((skill) => [skill.name.normalize("NFKC").toLocaleLowerCase("en-US"), skill]));
+      const sourceOrdinal = files.length;
+      let recordOrdinal = 0;
+      for (const line of history.split("\n")) {
+        if (!line) continue;
+        recordOrdinal += 1;
+        try {
+          const item = JSON.parse(line) as Record<string, unknown>;
+          const sessionKey = textAt(item, "session_id");
+          const timestamp = textAt(item, "ts");
+          const text = textAt(item, "text");
+          if (!sessionKey || !timestamp || !text || Number.isNaN(Date.parse(timestamp))) continue;
+          const session = merged.get(sessionKey) ?? {
+            sessionKey,
+            loads: [],
+            requests: [],
+            unreadableRecords: 0,
+            unresolvedLoadCandidates: 0,
+            unresolvedRequestCandidates: 0,
+          };
+          if (session.isSubagent) continue;
+          const tokens = text.includes("$") ? requestTokens(text) : [];
+          if (tokens.length === 0) continue;
+          const fingerprint = requestFingerprint(text);
+          for (const token of tokens) {
+            const skill = skillsByName.get(token);
+            if (!skill) {
+              session.unresolvedRequestCandidates += 1;
+              continue;
+            }
+            session.requests.push({ skill, occurredAt: new Date(timestamp).toISOString(), turnKey: `history-${recordOrdinal}`, messageFingerprint: fingerprint, sourceOrdinal, recordOrdinal });
+          }
+          merged.set(sessionKey, session);
+        } catch {
+          requestUnreadableRecords += 1;
+        }
+      }
+    } catch {
+      // history.jsonl is optional; its absence is not a coverage failure.
+    }
+    if (collectRequests) for (const session of merged.values()) {
+      const grouped = new Map<string, Map<number, typeof session.requests>>();
+      for (const item of session.requests) {
+        const key = `${item.skill.id}\u0000${item.occurredAt}\u0000${item.messageFingerprint ?? item.turnKey}`;
+        const sources = grouped.get(key) ?? new Map<number, typeof session.requests>();
+        const source = item.sourceOrdinal ?? Number.MAX_SAFE_INTEGER;
+        const events = sources.get(source) ?? [];
+        events.push(item);
+        sources.set(source, events);
+        grouped.set(key, sources);
+      }
+      session.requests = [...grouped.values()].flatMap((sources) => {
+        const count = Math.max(...[...sources.values()].map((events) => events.length));
+        return [...sources.values()].flat().sort((left, right) =>
+          (left.sourceOrdinal ?? Number.MAX_SAFE_INTEGER) - (right.sourceOrdinal ?? Number.MAX_SAFE_INTEGER) ||
+          (left.recordOrdinal ?? Number.MAX_SAFE_INTEGER) - (right.recordOrdinal ?? Number.MAX_SAFE_INTEGER),
+        ).slice(0, count);
+      });
+    }
+    if (collectRequests) for (const session of merged.values()) {
+      if (!session.parentSessionKey || session.isSubagent) continue;
+      const parent = merged.get(session.parentSessionKey);
+      if (!parent) {
+        const rolloutCandidates = session.requests.filter((item) => item.messageOrdinal !== undefined);
+        session.unresolvedRequestCandidates += rolloutCandidates.length;
+        session.requests = session.requests.filter((item) => item.messageOrdinal === undefined);
+        continue;
+      }
+      const inherited = new Set(parent.requests
+        .filter((item) => item.messageOrdinal !== undefined && item.messageFingerprint)
+        .map((item) => `${item.skill.id}\u0000${item.messageOrdinal}\u0000${item.messageFingerprint}`));
+      session.requests = session.requests.filter((item) =>
+        item.messageOrdinal === undefined || !item.messageFingerprint ||
+        !inherited.has(`${item.skill.id}\u0000${item.messageOrdinal}\u0000${item.messageFingerprint}`),
+      );
     }
     const sessions = [...merged.values()];
     const projects = new Map(
@@ -632,6 +894,7 @@ export class CodexSkillScanner implements PlatformSkillScanner {
         filesScanned: completedFiles,
         bytesScanned: processedBytes,
         unreadableRecords: results.reduce((sum, result) => sum + result.unreadableRecords, 0),
+        requestUnreadableRecords,
       },
     };
   }

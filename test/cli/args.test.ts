@@ -4,7 +4,10 @@ import test from "node:test";
 import { parseCliArgs } from "../../src/cli/args.js";
 
 test("defaults to four workers for date-scoped scanning", () => {
-  assert.equal(parseCliArgs([], new Date("2026-08-30T00:00:00.000Z")).request.jobs, 4);
+  const options = parseCliArgs([], new Date("2026-08-30T00:00:00.000Z"));
+  assert.equal(options.request.jobs, 4);
+  assert.equal(options.request.includeRequested, false);
+  assert.equal(options.limit, 0);
 });
 
 test("resolves --days as inclusive local dates", () => {
@@ -44,4 +47,19 @@ test("keeps local date boundaries across DST transition", () => {
     assert.equal(options.request.range.untilExclusive, "2026-03-09T07:00:00.000Z");
     assert.equal(Date.parse(options.request.range.untilExclusive) - Date.parse(options.request.range.from), 23 * 60 * 60 * 1000);
   }
+});
+
+test("selects requested output and validates display options before scanning", () => {
+  const options = parseCliArgs(["--requested", "--limit", "0"], new Date("2026-08-31T00:00:00.000Z")) as unknown as {
+    requested: boolean;
+    limit: number;
+    showZero: boolean;
+  };
+  assert.equal(options.requested, true);
+  assert.equal(options.limit, 0);
+  assert.equal(options.showZero, false);
+  assert.equal(parseCliArgs(["--json"]).request.includeRequested, true);
+  assert.throws(() => parseCliArgs(["--requested", "--show-zero"]), /--show-zero/);
+  assert.throws(() => parseCliArgs(["--limit", "1.5"]), /--limit/);
+  assert.throws(() => parseCliArgs(["--json", "--limit", "10"]), /--json/);
 });

@@ -20,6 +20,9 @@ Default: --days 30
   --project NAME_OR_ID
   --codex-home PATH
   --jobs 1..4
+  --requested
+  --limit N                 default: 0 (all)
+  --show-zero
   --json
   --help
   --version
@@ -36,11 +39,11 @@ interface CliIo {
   stderr: Output;
 }
 
-function progressLine(completed: number, total: number, processed: number, totalBytes: number, elapsed: number): string {
+export function progressLine(completed: number, total: number, processed: number, totalBytes: number, elapsed: number): string {
   const mib = (value: number) => `${(value / 1024 / 1024).toFixed(value >= 1024 * 1024 * 1024 ? 0 : 1)} MiB`;
   const percent = totalBytes > 0 ? Math.floor((processed / totalBytes) * 100) : total === 0 ? 100 : 0;
   const seconds = Math.floor(elapsed / 1000);
-  return `\r扫描 ${completed}/${total} 个文件 · ${mib(processed)}/${mib(totalBytes)} · ${percent}% · ${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  return `\rScanning ${completed}/${total} files · ${mib(processed)}/${mib(totalBytes)} · ${percent}% · ${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function safeMessage(error: unknown): string {
@@ -56,7 +59,7 @@ export async function runCli(args: string[], io: CliIo = process): Promise<numbe
       return 0;
     }
     if (options.version) {
-      io.stdout.write("0.1.2\n");
+      io.stdout.write("1.0.0\n");
       return 0;
     }
     let wroteProgress = false;
@@ -80,10 +83,13 @@ export async function runCli(args: string[], io: CliIo = process): Promise<numbe
       io.stderr.write("No recognizable Codex history found. Use --codex-home to select another local directory.\n");
       return 2;
     }
-    const report = analyzeSkillUsage(options.request, scan, "0.1.2");
+    const report = analyzeSkillUsage(options.request, scan, "1.0.0");
     io.stdout.write(options.json ? renderJson(report) : renderTerminal(report, {
       isTTY: Boolean(io.stdout.isTTY),
       columns: io.stdout.columns,
+      requested: options.requested,
+      limit: options.limit,
+      showZero: options.showZero,
     }));
     return 0;
   } catch (error) {

@@ -1,12 +1,16 @@
-Skill usage · codex
-
+skillusage · codex · Loaded
 2026-08-01 – 2026-08-31 · All projects
-28 loads · 12 sessions · 2 / 3 skills loaded
+78 loads · 23 sessions · 5 skills with loads
+Trend ▁▂▃▅▄▆█▅▆▇▅▆ · 31 days
+Last 7 complete days: 14 → 21 (+7) · 08-18–08-24 → 08-25–08-31
 
-Loaded skills · 2
-#  Skill                    Loads  Sessions  Last load
-1  brainstorming               16         9  2026-08-30
-2  test-driven-development     12         8  2026-08-30
+#  Skill                           Loads  Sess  Last date   Trend
+1  brainstorming                     31    12  2026-08-31  ▁▂▃▄▆█▅▆▇▅▆█
+2  test-driven-development           24    10  2026-08-30  ·▁▂▃▅█▆▄▅▃▆▇
+3  verification-before-completion    12     8  2026-08-31  ··▁▂▄▆█▅▄▃▆█
+4  diagnose                           7     4  2026-08-29  ···▁▃█▄▂▁··▃
+5  openai-docs                        4     3  2026-08-28  ····▁··█·▁··
 
-Not loaded in this range · 1
-review
+8 current skills: no load detected in range · --show-zero
+Trend: daily average / bucket; each row scaled independently.
+Explicit requests: skillusage --requested
