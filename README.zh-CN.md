@@ -1,5 +1,7 @@
 # skillusage
 
+[![npm 版本](https://img.shields.io/npm/v/@uujx/skillusage.svg)](https://www.npmjs.com/package/@uujx/skillusage) [![npm 下载量](https://img.shields.io/npm/dt/@uujx/skillusage.svg)](https://www.npmjs.com/package/@uujx/skillusage) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 [English](./README.md) · 简体中文
 
 查看你最常使用哪些 Codex Skill，以及哪些已安装 Skill 没有使用记录。

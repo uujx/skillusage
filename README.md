@@ -1,5 +1,7 @@
 # skillusage
 
+[![npm version](https://img.shields.io/npm/v/@uujx/skillusage.svg)](https://www.npmjs.com/package/@uujx/skillusage) [![npm downloads](https://img.shields.io/npm/dt/@uujx/skillusage.svg)](https://www.npmjs.com/package/@uujx/skillusage) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 English · [简体中文](./README.zh-CN.md)
 
 See which Codex skills you use most, and which installed skills have no recorded use.
